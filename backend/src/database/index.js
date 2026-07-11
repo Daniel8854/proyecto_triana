@@ -1,158 +1,192 @@
-const mysql = require('mysql2/promise');
+const { createClient } = require('@supabase/supabase-js');
+const { normalizarTelefono } = require('../utils/telefono');
 require('dotenv').config();
 
 class Database {
     constructor() {
-        this.pool = null;
+        this.client = null;
     }
-    
+
     async connect() {
-        this.pool = await mysql.createPool({
-            host: process.env.DB_HOST || 'localhost',
-            user: process.env.DB_USER || 'root',
-            password: process.env.DB_PASSWORD || '',
-            database: process.env.DB_NAME || 'triana_db',
-            waitForConnections: true,
-            connectionLimit: 10
-        });
-        
-        await this.initTables();
-    }
-    
-    async initTables() {
-        const queries = [
-            `CREATE TABLE IF NOT EXISTS clientes (
-                id INT PRIMARY KEY AUTO_INCREMENT,
-                nombre VARCHAR(100),
-                telefono VARCHAR(20),
-                producto VARCHAR(100),
-                estado VARCHAR(20) DEFAULT 'aldia',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )`,
-            
-            `CREATE TABLE IF NOT EXISTS cuotas (
-                id INT PRIMARY KEY AUTO_INCREMENT,
-                cliente_id INT,
-                numero INT,
-                total_cuotas INT,
-                valor DECIMAL(10,2),
-                fecha_vencimiento DATE,
-                estado VARCHAR(20) DEFAULT 'pendiente',
-                FOREIGN KEY (cliente_id) REFERENCES clientes(id)
-            )`,
-            
-            `CREATE TABLE IF NOT EXISTS pagos (
-                id INT PRIMARY KEY AUTO_INCREMENT,
-                cliente_id INT,
-                cuota_id INT,
-                monto DECIMAL(10,2),
-                fecha DATETIME,
-                comprobante TEXT,
-                FOREIGN KEY (cliente_id) REFERENCES clientes(id)
-            )`
-        ];
-        
-        for (const query of queries) {
-            await this.pool.execute(query);
+        if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
+            throw new Error('Faltan SUPABASE_URL o SUPABASE_SERVICE_KEY en el .env');
+        }
+
+        this.client = createClient(
+            process.env.SUPABASE_URL,
+            process.env.SUPABASE_SERVICE_KEY
+        );
+
+        // Verifica que la conexión y las tablas existan (deben crearse antes con supabase/schema.sql)
+        const { error } = await this.client.from('clientes').select('id').limit(1);
+        if (error) {
+            throw new Error(`No se pudo conectar a Supabase o falta correr supabase/schema.sql: ${error.message}`);
         }
     }
-    
+
+    async crearVenta({ nombre, telefono, producto, cuotas, valorCuota }) {
+        const { data: cliente, error: errorCliente } = await this.client
+            .from('clientes')
+            .insert({ nombre, telefono: normalizarTelefono(telefono), producto })
+            .select()
+            .single();
+
+        if (errorCliente) throw errorCliente;
+
+        const filasCuotas = [];
+        for (let i = 1; i <= cuotas; i++) {
+            const fechaVencimiento = new Date();
+            fechaVencimiento.setMonth(fechaVencimiento.getMonth() + i);
+
+            filasCuotas.push({
+                cliente_id: cliente.id,
+                numero: i,
+                total_cuotas: cuotas,
+                valor: valorCuota,
+                fecha_vencimiento: fechaVencimiento.toISOString().slice(0, 10)
+            });
+        }
+
+        const { error: errorCuotas } = await this.client.from('cuotas').insert(filasCuotas);
+        if (errorCuotas) throw errorCuotas;
+
+        return cliente;
+    }
+
     async getClienteByTelefono(telefono) {
-        const [rows] = await this.pool.execute(
-            'SELECT * FROM clientes WHERE telefono = ?',
-            [telefono]
-        );
-        return rows[0];
+        const { data, error } = await this.client
+            .from('clientes')
+            .select('*')
+            .eq('telefono', normalizarTelefono(telefono))
+            .maybeSingle();
+
+        if (error) throw error;
+        return data;
     }
-    
+
     async getProximaCuota(clienteId) {
-        const [rows] = await this.pool.execute(
-            `SELECT c.*, cl.nombre, cl.telefono 
-             FROM cuotas c 
-             JOIN clientes cl ON c.cliente_id = cl.id 
-             WHERE c.cliente_id = ? AND c.estado = 'pendiente'
-             ORDER BY c.numero ASC LIMIT 1`,
-            [clienteId]
-        );
-        return rows[0];
+        const { data, error } = await this.client
+            .from('cuotas')
+            .select('*')
+            .eq('cliente_id', clienteId)
+            .eq('estado', 'pendiente')
+            .order('numero', { ascending: true })
+            .limit(1)
+            .maybeSingle();
+
+        if (error) throw error;
+        return data;
     }
-    
+
     async getCuotasPendientes(clienteId) {
-        const [rows] = await this.pool.execute(
-            `SELECT * FROM cuotas 
-             WHERE cliente_id = ? AND estado = 'pendiente'
-             ORDER BY numero ASC`,
-            [clienteId]
-        );
-        return rows;
+        const { data, error } = await this.client
+            .from('cuotas')
+            .select('*')
+            .eq('cliente_id', clienteId)
+            .eq('estado', 'pendiente')
+            .order('numero', { ascending: true });
+
+        if (error) throw error;
+        return data;
     }
-    
+
+    async subirComprobante(clienteId, base64Image) {
+        const base64Data = base64Image.replace(/^data:image\/\w+;base64,/, '');
+        const buffer = Buffer.from(base64Data, 'base64');
+        const path = `${clienteId}/${Date.now()}.jpg`;
+
+        const { error } = await this.client.storage
+            .from('comprobantes')
+            .upload(path, buffer, { contentType: 'image/jpeg' });
+
+        if (error) throw error;
+        return path;
+    }
+
     async registrarPago(pago) {
-        const connection = await this.pool.getConnection();
-        try {
-            await connection.beginTransaction();
-            
-            // Registrar pago
-            await connection.execute(
-                `INSERT INTO pagos (cliente_id, cuota_id, monto, fecha, comprobante)
-                 VALUES (?, ?, ?, ?, ?)`,
-                [pago.cliente_id, pago.cuota_id, pago.monto, pago.fecha, pago.comprobante]
-            );
-            
-            // Actualizar cuota
-            await connection.execute(
-                `UPDATE cuotas SET estado = 'pagado' WHERE id = ?`,
-                [pago.cuota_id]
-            );
-            
-            await connection.commit();
-        } catch (error) {
-            await connection.rollback();
-            throw error;
-        } finally {
-            connection.release();
+        let comprobanteUrl = null;
+        if (pago.comprobante) {
+            comprobanteUrl = await this.subirComprobante(pago.cliente_id, pago.comprobante);
         }
+
+        const { error: errorPago } = await this.client.from('pagos').insert({
+            cliente_id: pago.cliente_id,
+            cuota_id: pago.cuota_id,
+            monto: pago.monto,
+            fecha: pago.fecha,
+            comprobante_url: comprobanteUrl
+        });
+        if (errorPago) throw errorPago;
+
+        const { error: errorCuota } = await this.client
+            .from('cuotas')
+            .update({ estado: 'pagado' })
+            .eq('id', pago.cuota_id);
+        if (errorCuota) throw errorCuota;
     }
-    
+
     async getPagosDelDia(fecha) {
-        const [rows] = await this.pool.execute(
-            `SELECT p.*, c.nombre as cliente_nombre, cu.numero as cuota_numero
-             FROM pagos p
-             JOIN clientes c ON p.cliente_id = c.id
-             JOIN cuotas cu ON p.cuota_id = cu.id
-             WHERE DATE(p.fecha) = DATE(?)`,
-            [fecha]
-        );
-        return rows;
+        const inicio = new Date(fecha);
+        inicio.setHours(0, 0, 0, 0);
+        const fin = new Date(fecha);
+        fin.setHours(23, 59, 59, 999);
+
+        const { data, error } = await this.client
+            .from('pagos')
+            .select('*, clientes(nombre), cuotas(numero)')
+            .gte('fecha', inicio.toISOString())
+            .lte('fecha', fin.toISOString());
+
+        if (error) throw error;
+
+        return data.map(p => ({
+            ...p,
+            cliente_nombre: p.clientes?.nombre,
+            cuota_numero: p.cuotas?.numero
+        }));
     }
-    
+
     async getClientesAtrasados() {
-        const [rows] = await this.pool.execute(
-            `SELECT DISTINCT c.*, cu.fecha_vencimiento
-             FROM clientes c
-             JOIN cuotas cu ON c.id = cu.cliente_id
-             WHERE cu.estado = 'pendiente' 
-             AND cu.fecha_vencimiento < CURDATE()`
-        );
-        return rows;
+        const hoy = new Date().toISOString().slice(0, 10);
+
+        const { data, error } = await this.client
+            .from('cuotas')
+            .select('fecha_vencimiento, clientes(*)')
+            .eq('estado', 'pendiente')
+            .lt('fecha_vencimiento', hoy);
+
+        if (error) throw error;
+
+        const vistos = new Map();
+        for (const fila of data) {
+            if (fila.clientes && !vistos.has(fila.clientes.id)) {
+                vistos.set(fila.clientes.id, { ...fila.clientes, fecha_vencimiento: fila.fecha_vencimiento });
+            }
+        }
+        return Array.from(vistos.values());
     }
-    
+
     async getCuotasAtrasadas(clienteId) {
-        const [rows] = await this.pool.execute(
-            `SELECT * FROM cuotas 
-             WHERE cliente_id = ? 
-             AND estado = 'pendiente'
-             AND fecha_vencimiento < CURDATE()`,
-            [clienteId]
-        );
-        return rows;
+        const hoy = new Date().toISOString().slice(0, 10);
+
+        const { data, error } = await this.client
+            .from('cuotas')
+            .select('*')
+            .eq('cliente_id', clienteId)
+            .eq('estado', 'pendiente')
+            .lt('fecha_vencimiento', hoy);
+
+        if (error) throw error;
+        return data;
     }
-    
+
     async actualizarEstadoCliente(clienteId, estado) {
-        await this.pool.execute(
-            'UPDATE clientes SET estado = ? WHERE id = ?',
-            [estado, clienteId]
-        );
+        const { error } = await this.client
+            .from('clientes')
+            .update({ estado })
+            .eq('id', clienteId);
+
+        if (error) throw error;
     }
 }
 

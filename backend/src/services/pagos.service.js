@@ -1,33 +1,34 @@
 const database = require('../database');
 const ocrService = require('./ocr.service');
+const iaService = require('./ia.service');
 
 class PagosService {
-    async procesarComprobante(media, numeroCliente, client) {
+    async procesarComprobante(media, numeroCliente, chatId, client) {
         try {
             // 1. Extraer texto de la imagen
             const texto = await ocrService.leerImagen(media.data);
-            
+
             // 2. Extraer datos del comprobante
             const datosPago = await this.extraerDatosPago(texto);
-            
+
             // 3. Buscar cliente
             const cliente = await database.getClienteByTelefono(numeroCliente);
-            
+
             if (!cliente) {
-                await client.sendMessage(numeroCliente, 
+                await client.sendMessage(chatId,
                     "❌ No te encuentro en el sistema. ¿Podrías darme tu nombre completo?");
                 return;
             }
-            
+
             // 4. Validar monto con cuota pendiente
             const cuotaPendiente = await database.getProximaCuota(cliente.id);
-            
+
             if (!cuotaPendiente) {
-                await client.sendMessage(numeroCliente,
+                await client.sendMessage(chatId,
                     "✅ ¡Estás al día! No tienes cuotas pendientes.");
                 return;
             }
-            
+
             // 5. Verificar si el monto coincide
             if (Math.abs(datosPago.monto - cuotaPendiente.valor) < 1) {
                 // Registrar pago
@@ -38,44 +39,55 @@ class PagosService {
                     fecha: new Date(),
                     comprobante: media.data
                 });
-                
-                const siguienteCuota = cuotaPendiente.numero + 1;
-                const totalCuotas = cuotaPendiente.total;
-                
-                await client.sendMessage(numeroCliente,
+
+                const totalCuotas = cuotaPendiente.total_cuotas;
+                const cuotaPagada = cuotaPendiente.numero;
+
+                let mensajeConfirmacion =
                     `✅ ¡Pago confirmado! R$${datosPago.monto}\n` +
-                    `📊 Cuota ${siguienteCuota-1}/${totalCuotas} pagada\n` +
-                    `🎯 Siguiente cuota: ${siguienteCuota}/${totalCuotas}\n\n` +
-                    `¡Gracias por tu pago, ${cliente.nombre}! 🙌`);
-                    
+                    `📊 Cuota ${cuotaPagada}/${totalCuotas} pagada\n\n`;
+
+                if (cuotaPagada >= totalCuotas) {
+                    mensajeConfirmacion += `🎉 ¡Completaste todas tus cuotas! Gracias por tu confianza, ${cliente.nombre} 🙌`;
+                } else {
+                    mensajeConfirmacion += `🎯 Siguiente cuota: ${cuotaPagada + 1}/${totalCuotas}\n\n¡Gracias por tu pago, ${cliente.nombre}! 🙌`;
+                }
+
+                await client.sendMessage(chatId, mensajeConfirmacion);
+
                 // Actualizar estado del cliente
                 await this.verificarAtrasos(cliente.id);
             } else {
-                await client.sendMessage(numeroCliente,
+                await client.sendMessage(chatId,
                     `⚠️ El monto detectado es R$${datosPago.monto}\n` +
                     `Tu cuota es de R$${cuotaPendiente.valor}\n\n` +
                     `¿Podrías confirmar el monto exacto que pagaste?`);
             }
-            
+
         } catch (error) {
             console.error('Error procesando pago:', error);
-            await client.sendMessage(numeroCliente,
+            await client.sendMessage(chatId,
                 "🤔 No pude leer bien tu comprobante.\n" +
                 "¿Podrías escribir el valor que pagaste y tu nombre?");
         }
     }
     
     async extraerDatosPago(texto) {
-        // Extraer monto usando regex
+        try {
+            const datos = await iaService.extraerDatosComprobante(texto);
+            if (datos && typeof datos.monto === 'number') {
+                return { monto: datos.monto, nombre_detectado: datos.nombre || null, texto_original: texto };
+            }
+        } catch (error) {
+            console.error('IA no pudo leer el comprobante, uso regex de respaldo:', error.message);
+        }
+
+        // Respaldo: extraer monto con regex si la IA falla o no encontró nada
         const montoRegex = /R?\$?\s*(\d+(?:[.,]\d{2})?)/i;
         const match = texto.match(montoRegex);
-        
-        let monto = match ? parseFloat(match[1].replace(',', '.')) : 0;
-        
-        return {
-            monto: monto,
-            texto_original: texto
-        };
+        const monto = match ? parseFloat(match[1].replace(',', '.')) : 0;
+
+        return { monto, nombre_detectado: null, texto_original: texto };
     }
     
     async verificarAtrasos(clienteId) {

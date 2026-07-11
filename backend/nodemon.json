@@ -1,0 +1,5 @@
+{
+  "watch": ["index.js", "src"],
+  "ext": "js,mjs,cjs,json",
+  "ignore": [".wwebjs_auth/**", ".wwebjs_cache/**", "qr-sesion-*.png", "node_modules/**"]
+}

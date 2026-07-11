@@ -18,6 +18,7 @@ backend/.wwebjs_auth/
 backend/.wwebjs_cache/
 session/
 *.session
+backend/qr-sesion-*.png
 
 # Builds
 frontend/build/

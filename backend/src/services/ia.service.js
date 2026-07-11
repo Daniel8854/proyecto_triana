@@ -48,8 +48,13 @@ class IAService {
             messages: [{ role: "user", content: prompt }],
             temperature: 0
         });
-        
-        return response.choices[0].message.content.trim();
+
+        const respuesta = response.choices[0].message.content.trim().toLowerCase();
+
+        if (respuesta.includes('consultar_deuda')) return 'consultar_deuda';
+        if (respuesta.includes('reportar_pago')) return 'reportar_pago';
+        if (respuesta.includes('duda')) return 'duda';
+        return 'otro';
     }
 
     async consultarDeuda(cliente) {
@@ -94,16 +99,22 @@ class IAService {
         return response.choices[0].message.content;
     }
 
-    async generarInformeDiario(resumen) {
+    async extraerDatosComprobante(texto) {
+        const prompt = `Del siguiente texto extraído por OCR de un comprobante de pago (puede tener errores de lectura), extraé el monto pagado y, si aparece, el nombre del pagador.
+
+Respondé SOLO con un JSON de la forma {"monto": number|null, "nombre": string|null}. Si no encontrás el monto, usá null.
+
+Texto:
+"""${texto}"""`;
+
         const response = await this.openai.chat.completions.create({
             model: "gpt-3.5-turbo",
-            messages: [
-                { role: "system", content: "Genera un resumen diario de pagos para WhatsApp, formato amigable con emojis." },
-                { role: "user", content: `Genera informe con: ${JSON.stringify(resumen)}` }
-            ]
+            messages: [{ role: "user", content: prompt }],
+            temperature: 0,
+            response_format: { type: "json_object" }
         });
-        
-        return response.choices[0].message.content;
+
+        return JSON.parse(response.choices[0].message.content);
     }
 }
 
