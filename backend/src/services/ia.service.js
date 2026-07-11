@@ -1,11 +1,14 @@
 const { OpenAI } = require('openai');
 const database = require('../database');
+const { SYSTEM_PROMPT } = require('../config/personalidad');
 
 class IAService {
     constructor() {
         this.openai = new OpenAI({
-            apiKey: process.env.OPENAI_API_KEY
+            apiKey: process.env.OPENAI_API_KEY,
+            baseURL: process.env.OPENAI_BASE_URL || undefined
         });
+        this.modelo = process.env.OPENAI_MODEL || 'gpt-3.5-turbo';
     }
 
     async procesarMensaje(mensaje, numeroCliente) {
@@ -44,7 +47,7 @@ class IAService {
         `;
         
         const response = await this.openai.chat.completions.create({
-            model: "gpt-3.5-turbo",
+            model: this.modelo,
             messages: [{ role: "user", content: prompt }],
             temperature: 0
         });
@@ -89,9 +92,9 @@ class IAService {
 
     async responderDuda(mensaje, cliente) {
         const response = await this.openai.chat.completions.create({
-            model: "gpt-3.5-turbo",
+            model: this.modelo,
             messages: [
-                { role: "system", content: "Eres Triana, asistente de ventas de muebles. Responde de forma amable y profesional." },
+                { role: "system", content: SYSTEM_PROMPT },
                 { role: "user", content: mensaje }
             ]
         });
@@ -108,7 +111,7 @@ Texto:
 """${texto}"""`;
 
         const response = await this.openai.chat.completions.create({
-            model: "gpt-3.5-turbo",
+            model: this.modelo,
             messages: [{ role: "user", content: prompt }],
             temperature: 0,
             response_format: { type: "json_object" }

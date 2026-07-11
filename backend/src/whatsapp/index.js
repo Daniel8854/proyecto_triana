@@ -19,7 +19,11 @@ class WhatsAppService {
             const client = new Client({
                 authStrategy: new LocalAuth({
                     clientId: `whatsapp-${i + 1}`
-                })
+                }),
+                puppeteer: {
+                    headless: true,
+                    args: ['--no-sandbox', '--disable-setuid-sandbox']
+                }
             });
 
             client.on('qr', async (qr) => {
@@ -47,8 +51,24 @@ class WhatsAppService {
                 console.log(`⚠️ Sesión ${i + 1} desconectada: ${reason}`);
             });
 
-            await client.initialize();
+            // whatsapp-web.js tiene una condición de carrera conocida al inyectar su script
+            // (la página de WhatsApp Web a veces se recarga justo en ese momento y tira
+            // "Execution context was destroyed"). Reintentamos unas veces antes de rendirnos.
+            await this.initializeConReintentos(client, i + 1);
             this.clients.push(client);
+        }
+    }
+
+    async initializeConReintentos(client, numeroSesion, intentos = 3) {
+        for (let intento = 1; intento <= intentos; intento++) {
+            try {
+                await client.initialize();
+                return;
+            } catch (error) {
+                console.error(`⚠️ Sesión ${numeroSesion} - intento ${intento}/${intentos} falló: ${error.message}`);
+                if (intento === intentos) throw error;
+                await new Promise(resolve => setTimeout(resolve, 3000));
+            }
         }
     }
 
@@ -102,6 +122,12 @@ class WhatsAppService {
             }
         } catch (error) {
             console.error(`❌ Error procesando mensaje de ${numero}:`, error);
+            try {
+                await client.sendMessage(chatId,
+                    "🤖 Tuve un problema procesando tu mensaje. Probá de nuevo en un rato, o escribinos directamente si sigue fallando.");
+            } catch (sendError) {
+                console.error(`❌ Tampoco se pudo avisarle a ${numero} del error:`, sendError.message);
+            }
         }
     }
 

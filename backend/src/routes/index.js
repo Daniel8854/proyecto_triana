@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const database = require('../database');
 const pagosService = require('../services/pagos.service');
+const cronJobs = require('../jobs/cron.jobs');
 
 // API para registrar nueva venta
 router.post('/ventas', async (req, res) => {
@@ -33,6 +34,16 @@ router.get('/dashboard', async (req, res) => {
         atrasados,
         totalRecibido
     });
+});
+
+// Dispara el informe diario manualmente, sin esperar al cron de las 9 PM (solo para pruebas)
+router.post('/test/informe-diario', async (req, res) => {
+    try {
+        await cronJobs.generarInformeDiario();
+        res.json({ success: true, message: 'Informe enviado' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
 });
 
 module.exports = router;
